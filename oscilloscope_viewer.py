@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
-                              QPushButton, QWidget, QFileDialog, QLabel, QSpinBox)
+                              QPushButton, QWidget, QFileDialog, QLabel, QSpinBox,
+                              QMessageBox)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 import pyqtgraph as pg
+from parsers import AVAILABLE_PARSERS
 
 class CursorLine(pg.InfiniteLine):
     def __init__(self, angle=90, pos=0, movable=True, label=None):
@@ -47,6 +49,15 @@ def decimate_data(x, y, max_points=10000):
     y_final = np.dstack((y_mins, y_maxs)).flatten()
     
     return x_final, y_final
+
+class OscilloscopeCSVParser:
+    def can_parse(self, first_lines):
+        """Check if this parser can handle the CSV format based on first few lines"""
+        raise NotImplementedError()
+        
+    def parse(self, file_path):
+        """Parse the CSV file and return (metadata, data_frame)"""
+        raise NotImplementedError()
 
 class OscilloscopeViewer(QMainWindow):
     def __init__(self):
@@ -173,34 +184,41 @@ class OscilloscopeViewer(QMainWindow):
         )
         
         if file_name:
-            # Read metadata
-            metadata_lines = []
+            # Read first few lines to detect format
             with open(file_name, 'r') as f:
-                for i, line in enumerate(f):
-                    if 'Second,Value' in line:
-                        break
-                    metadata_lines.append(line)
+                first_lines = [f.readline() for _ in range(10)]
+            
+            # Find suitable parser
+            parser = None
+            for p in AVAILABLE_PARSERS:
+                if p.can_parse(first_lines):
+                    parser = p
+                    break
                     
-            # Parse metadata
-            self.metadata = {}
-            for line in metadata_lines:
-                if ',' in line:
-                    key, *values = line.strip().split(',')
-                    self.metadata[key] = values
+            if parser is None:
+                QMessageBox.critical(self, "Error", 
+                    "Unsupported CSV format. Currently supported formats:\n" +
+                    "\n".join(f"- {p.__class__.__name__.replace('CSVParser', '')}" 
+                             for p in AVAILABLE_PARSERS))
+                return
             
-            # Read data
-            self.raw_data = pd.read_csv(file_name, skiprows=len(metadata_lines),
-                                      dtype={'Second': float, 'Value': float})
-            
-            # Update data info label
-            self.data_info_label.setText(
-                f"Total points: {len(self.raw_data):,}\n"
-                f"Displayed points: {self.decimation_factor:,}"
-            )
-            
-            # Plot decimated data
-            self.update_plot()
-            
+            try:
+                # Parse the file
+                self.metadata, self.raw_data = parser.parse(file_name)
+                
+                # Update data info label
+                self.data_info_label.setText(
+                    f"Total points: {len(self.raw_data):,}\n"
+                    f"Displayed points: {self.decimation_factor:,}"
+                )
+                
+                # Plot decimated data
+                self.update_plot()
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to parse CSV file: {str(e)}")
+                return
+
     def update_decimation(self, value):
         self.decimation_factor = value
         if self.raw_data is not None:
