@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from .base_parser import OscilloscopeCSVParser
 
 class RigolArbCSVParser(OscilloscopeCSVParser):
@@ -7,39 +8,78 @@ class RigolArbCSVParser(OscilloscopeCSVParser):
         # Rigol Arb files start with this specific header
         return any('RIGOL:CSV DATA FILE' in line for line in first_lines)
         
-    def parse(self, file_path):
+    def parse(self, file_path, progress_callback=None):
         metadata = {}
-        data_start = 0
+        file_size = Path(file_path).stat().st_size
+        
+        if progress_callback:
+            progress_callback(0, 100, "Reading metadata...")
         
         # Read and parse metadata
+        data_lines = []
         with open(file_path, 'r') as f:
-            lines = f.readlines()
-            
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line:  # Skip empty lines
-                continue
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:  # Skip empty lines
+                    continue
+                    
+                if ':' in line and i < 10:  # Only parse metadata in first few lines
+                    key, value = line.split(':', 1)
+                    metadata[key] = value
+                elif line[0].isdigit():  # Found start of data
+                    data_lines.append(line)  # Keep this data line
+                    break
                 
-            if ':' in line and i < 10:  # Only parse metadata in first few lines
-                key, value = line.split(':', 1)
-                metadata[key] = value
-            elif line[0].isdigit():  # Found start of data
-                data_start = i
-                break
+                if progress_callback and i % 1000 == 0:
+                    progress_callback(min(10, int(5 * (f.tell() / file_size))), 
+                                   100, "Scanning file...")
         
+        if progress_callback:
+            progress_callback(10, 100, "Reading data values...")
+            
         # Get sample rate from metadata
         sample_rate = float(metadata.get('Sample Rate', '1'))  # Default to 1 if not found
         
-        # Read the voltage values
+        # Read the voltage values in chunks
         voltage_values = []
-        for line in lines[data_start:]:
-            line = line.strip()
-            if line and line[0].isdigit():  # Only process lines that start with a number
-                try:
-                    voltage_values.append(float(line))
-                except ValueError:
-                    continue
+        chunk_size = 100000
+        current_chunk = []
         
+        # Process the first data line we found
+        if data_lines:
+            try:
+                current_chunk.append(float(data_lines[0]))
+            except ValueError:
+                pass
+        
+        # Continue reading the rest of the file
+        with open(file_path, 'r') as f:
+            # Skip to where we found the first data line
+            for _ in range(len(metadata) + 1):  # +1 for the first data line we already processed
+                f.readline()
+                
+            for line in f:
+                line = line.strip()
+                if line and line[0].isdigit():
+                    try:
+                        current_chunk.append(float(line))
+                        if len(current_chunk) >= chunk_size:
+                            voltage_values.extend(current_chunk)
+                            current_chunk = []
+                            if progress_callback:
+                                progress = min(90, int(10 + 80 * (f.tell() / file_size)))
+                                progress_callback(progress, 100, 
+                                               f"Reading values... ({len(voltage_values):,} points)")
+                    except ValueError:
+                        continue
+                        
+        # Add any remaining values
+        if current_chunk:
+            voltage_values.extend(current_chunk)
+        
+        if progress_callback:
+            progress_callback(90, 100, "Creating DataFrame...")
+            
         # Create time values based on sample rate
         time_values = np.arange(len(voltage_values)) / sample_rate
         
@@ -48,5 +88,8 @@ class RigolArbCSVParser(OscilloscopeCSVParser):
             'Second': time_values,
             'Value': voltage_values
         })
+        
+        if progress_callback:
+            progress_callback(100, 100, "Done!")
         
         return metadata, data

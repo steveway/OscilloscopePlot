@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                               QPushButton, QWidget, QFileDialog, QLabel, QSpinBox,
-                              QMessageBox)
+                              QMessageBox, QProgressDialog)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 import pyqtgraph as pg
@@ -55,7 +55,7 @@ class OscilloscopeCSVParser:
         """Check if this parser can handle the CSV format based on first few lines"""
         raise NotImplementedError()
         
-    def parse(self, file_path):
+    def parse(self, file_path, update_progress=None):
         """Parse the CSV file and return (metadata, data_frame)"""
         raise NotImplementedError()
 
@@ -184,6 +184,22 @@ class OscilloscopeViewer(QMainWindow):
         )
         
         if file_name:
+            # Get file size for progress calculation
+            file_size = Path(file_name).stat().st_size
+            
+            # Create progress dialog
+            progress = QProgressDialog("Loading CSV file...", "Cancel", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setAutoClose(True)
+            progress.setMinimumDuration(0)  # Show immediately for large files
+            
+            def update_progress(current: int, total: int, message: str):
+                if progress.wasCanceled():
+                    raise InterruptedError("File loading cancelled by user")
+                progress.setLabelText(message)
+                progress.setValue(int(current * 100 / total))
+                QApplication.processEvents()  # Ensure UI remains responsive
+            
             # Read first few lines to detect format
             with open(file_name, 'r') as f:
                 first_lines = [f.readline() for _ in range(10)]
@@ -196,6 +212,7 @@ class OscilloscopeViewer(QMainWindow):
                     break
                     
             if parser is None:
+                progress.close()
                 QMessageBox.critical(self, "Error", 
                     "Unsupported CSV format. Currently supported formats:\n" +
                     "\n".join(f"- {p.__class__.__name__.replace('CSVParser', '')}" 
@@ -203,8 +220,8 @@ class OscilloscopeViewer(QMainWindow):
                 return
             
             try:
-                # Parse the file
-                self.metadata, self.raw_data = parser.parse(file_name)
+                # Parse the file with progress reporting
+                self.metadata, self.raw_data = parser.parse(file_name, update_progress)
                 
                 # Update data info label
                 self.data_info_label.setText(
@@ -215,9 +232,15 @@ class OscilloscopeViewer(QMainWindow):
                 # Plot decimated data
                 self.update_plot()
                 
+            except InterruptedError:
+                self.data_info_label.setText("Loading cancelled")
+                return
             except Exception as e:
+                progress.close()
                 QMessageBox.critical(self, "Error", f"Failed to parse CSV file: {str(e)}")
                 return
+            finally:
+                progress.close()
 
     def update_decimation(self, value):
         self.decimation_factor = value
