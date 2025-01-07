@@ -61,6 +61,23 @@ class OscilloscopeViewer(QMainWindow):
         self.metadata = {}
         self.raw_data = None  # Store complete dataset
         self.decimation_factor = 10000  # Default decimation points
+        self.dark_mode = False  # Track dark mode state
+        
+        # Define color schemes
+        self.color_schemes = {
+            'light': {
+                'background': 'w',
+                'foreground': 'k',
+                'grid': (128, 128, 128),
+                'plot': 'b',
+            },
+            'dark': {
+                'background': '#2b2b2b',
+                'foreground': 'w',
+                'grid': (90, 90, 90),
+                'plot': '#00a3ff',
+            }
+        }
         
         self.setup_ui()
         
@@ -102,6 +119,11 @@ class OscilloscopeViewer(QMainWindow):
         clear_cursors_button = QPushButton("Clear Cursors")
         clear_cursors_button.clicked.connect(self.clear_cursors)
         button_layout.addWidget(clear_cursors_button)
+        
+        # Add dark mode toggle
+        toggle_dark_mode = QPushButton("Toggle Dark Mode")
+        toggle_dark_mode.clicked.connect(self.toggle_dark_mode)
+        button_layout.addWidget(toggle_dark_mode)
         
         # Add decimation control
         decimation_layout = QHBoxLayout()
@@ -195,9 +217,13 @@ class OscilloscopeViewer(QMainWindow):
             max_points=self.decimation_factor
         )
         
+        # Get current color scheme
+        mode = 'dark' if self.dark_mode else 'light'
+        colors = self.color_schemes[mode]
+        
         # Update plot
         self.plot_widget.clear()
-        self.plot_widget.plot(x_dec, y_dec, pen=pg.mkPen('b', width=2))
+        self.plot_widget.plot(x_dec, y_dec, pen=pg.mkPen(colors['plot'], width=2))
         
         # Restore cursors
         for cursor in self.vertical_cursors + self.horizontal_cursors:
@@ -286,7 +312,26 @@ class OscilloscopeViewer(QMainWindow):
             self.hcursor_label.setText(f"ΔV: {delta_v:.6f} V")
         else:
             self.hcursor_label.setText("ΔV: --- V")
-
+            
+    def toggle_dark_mode(self):
+        self.dark_mode = not self.dark_mode
+        mode = 'dark' if self.dark_mode else 'light'
+        colors = self.color_schemes[mode]
+        
+        # Update plot colors
+        self.plot_widget.setBackground(colors['background'])
+        self.plot_widget.getAxis('left').setPen(colors['foreground'])
+        self.plot_widget.getAxis('bottom').setPen(colors['foreground'])
+        self.plot_widget.getAxis('left').setTextPen(colors['foreground'])
+        self.plot_widget.getAxis('bottom').setTextPen(colors['foreground'])
+        
+        # Update grid color
+        self.plot_widget.getPlotItem().getViewBox().setBackgroundColor(colors['background'])
+        
+        # Update plot if data is loaded
+        if self.raw_data is not None:
+            self.update_plot()
+            
 def main():
     app = QApplication(sys.argv)
     
