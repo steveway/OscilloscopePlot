@@ -29,16 +29,14 @@ class RigolArbCSVParser(OscilloscopeCSVParser):
                 elif line[0].isdigit():  # Found start of data
                     data_lines.append(line)  # Keep this data line
                     break
-                
-                if progress_callback and i % 1000 == 0:
-                    progress_callback(min(10, int(5 * (f.tell() / file_size))), 
-                                   100, "Scanning file...")
         
         if progress_callback:
             progress_callback(10, 100, "Reading data values...")
             
         # Get sample rate from metadata
         sample_rate = float(metadata.get('Sample Rate', '1'))  # Default to 1 if not found
+        number_of_data_points = int(metadata.get('DATA Number', '1'))
+        current_data_point_position = 0
         
         # Read the voltage values in chunks
         voltage_values = []
@@ -65,9 +63,10 @@ class RigolArbCSVParser(OscilloscopeCSVParser):
                         current_chunk.append(float(line))
                         if len(current_chunk) >= chunk_size:
                             voltage_values.extend(current_chunk)
+                            current_data_point_position += len(current_chunk)
                             current_chunk = []
                             if progress_callback:
-                                progress = min(90, int(10 + 80 * (f.tell() / file_size)))
+                                progress = min(90, int(10 + 80 * (current_data_point_position / number_of_data_points)))
                                 progress_callback(progress, 100, 
                                                f"Reading values... ({len(voltage_values):,} points)")
                     except ValueError:
@@ -76,7 +75,8 @@ class RigolArbCSVParser(OscilloscopeCSVParser):
         # Add any remaining values
         if current_chunk:
             voltage_values.extend(current_chunk)
-        
+            current_data_point_position += len(current_chunk)
+            
         if progress_callback:
             progress_callback(90, 100, "Creating DataFrame...")
             
