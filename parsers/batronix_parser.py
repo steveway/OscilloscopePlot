@@ -18,7 +18,7 @@ class BatronixCSVParser(OscilloscopeCSVParser):
         # First pass: find header and collect metadata
         with open(file_path, 'r') as f:
             for i, line in enumerate(f):
-                if 'time in s,CH1 in V' in line:
+                if line.startswith('time in s'):
                     header_found = True
                     header_line = i + 1  # Skip past the header line itself
                     break
