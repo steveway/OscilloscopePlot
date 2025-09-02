@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                               QPushButton, QWidget, QFileDialog, QLabel, QSpinBox,
-                              QMessageBox, QProgressDialog)
+                              QMessageBox, QProgressDialog, QComboBox)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 import pyqtgraph as pg
@@ -73,6 +73,7 @@ class OscilloscopeViewer(QMainWindow):
         self.raw_data = None  # Store complete dataset
         self.decimation_factor = 10000  # Default decimation points
         self.dark_mode = False  # Track dark mode state
+        self.selected_channel: int | None = None  # Active channel (e.g., 1..4) if available
         
         # Define color schemes
         self.color_schemes = {
@@ -146,6 +147,15 @@ class OscilloscopeViewer(QMainWindow):
         self.decimation_spinbox.valueChanged.connect(self.update_decimation)
         decimation_layout.addWidget(self.decimation_spinbox)
         button_layout.addLayout(decimation_layout)
+
+        # Channel selector (populated when file contains multiple channels)
+        channel_layout = QHBoxLayout()
+        channel_layout.addWidget(QLabel("Channel:"))
+        self.channel_combo = QComboBox()
+        self.channel_combo.setEnabled(False)
+        self.channel_combo.currentTextChanged.connect(self.on_channel_changed)
+        channel_layout.addWidget(self.channel_combo)
+        button_layout.addLayout(channel_layout)
         
         layout.addLayout(button_layout)
         
@@ -229,6 +239,30 @@ class OscilloscopeViewer(QMainWindow):
                     f"Displayed points: {self.decimation_factor:,}"
                 )
                 
+                # Populate channel selector if available
+                channels = self.metadata.get('Channels')
+                self.channel_combo.blockSignals(True)
+                self.channel_combo.clear()
+                if channels:
+                    for ch in channels:
+                        self.channel_combo.addItem(f"CH{ch}")
+                    # Prefer CH1 if present, else first
+                    if 1 in channels:
+                        self.channel_combo.setCurrentText("CH1")
+                        self.selected_channel = 1
+                    else:
+                        self.channel_combo.setCurrentIndex(0)
+                        # Extract number from text
+                        try:
+                            self.selected_channel = int(self.channel_combo.currentText().replace('CH',''))
+                        except Exception:
+                            self.selected_channel = None
+                    self.channel_combo.setEnabled(True)
+                else:
+                    self.channel_combo.setEnabled(False)
+                    self.selected_channel = None
+                self.channel_combo.blockSignals(False)
+
                 # Plot decimated data
                 self.update_plot()
                 
@@ -250,11 +284,29 @@ class OscilloscopeViewer(QMainWindow):
     def update_plot(self):
         if self.raw_data is None:
             return
-            
-        # Decimate data
+        
+        # Determine which value column to display
+        y_col = None
+        if self.selected_channel is not None:
+            candidate = f"Value_CH{self.selected_channel}"
+            if candidate in self.raw_data.columns:
+                y_col = candidate
+        if y_col is None:
+            # Fallback to default 'Value' if present
+            if 'Value' in self.raw_data.columns:
+                y_col = 'Value'
+            else:
+                # Last resort: pick the first Value_CHn column
+                ch_cols = [c for c in self.raw_data.columns if c.startswith('Value_CH')]
+                if ch_cols:
+                    y_col = ch_cols[0]
+        if y_col is None:
+            return
+
+        # Decimate data for selected column
         x_dec, y_dec = decimate_data(
             self.raw_data['Second'].values,
-            self.raw_data['Value'].values,
+            self.raw_data[y_col].values,
             max_points=self.decimation_factor
         )
         
@@ -281,6 +333,20 @@ class OscilloscopeViewer(QMainWindow):
             f"Total points: {len(self.raw_data):,}\n"
             f"Displayed points: {len(x_dec):,}"
         )
+
+    def on_channel_changed(self, text: str):
+        # Parse channel like "CH1" to integer 1
+        try:
+            if text.upper().startswith('CH'):
+                ch = int(text[2:])
+                self.selected_channel = ch
+            else:
+                self.selected_channel = None
+        except Exception:
+            self.selected_channel = None
+        # Re-plot with the selected channel
+        if self.raw_data is not None:
+            self.update_plot()
         
     def on_view_changed(self, view_box, range_):
         """Called when the view range changes (zoom/pan)"""
