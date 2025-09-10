@@ -4,7 +4,8 @@ import pandas as pd
 from pathlib import Path
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                               QPushButton, QWidget, QFileDialog, QLabel, QSpinBox,
-                              QMessageBox, QProgressDialog, QComboBox)
+                              QMessageBox, QProgressDialog, QComboBox, QDialog,
+                              QFormLayout, QDoubleSpinBox, QDialogButtonBox, QCheckBox)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 import pyqtgraph as pg
@@ -25,6 +26,288 @@ class CursorLine(pg.InfiniteLine):
     def on_position_change(self):
         if self.label:
             self.label.setText(f"{self.value():.6f}")
+
+class BinaryImportDialog(QDialog):
+    """Dialog to configure binary import settings."""
+    def __init__(self, parent=None, file_path: str | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Binary Import Settings")
+        self.file_path = file_path
+
+        layout = QFormLayout(self)
+
+        # Endianness
+        self.endian_combo = QComboBox()
+        self.endian_combo.addItems(["Little", "Big"])
+        layout.addRow("Endianness", self.endian_combo)
+
+        # Data type
+        self.dtype_combo = QComboBox()
+        # Common numeric formats
+        self.dtype_combo.addItems([
+            "int8", "uint8",
+            "int16", "uint16",
+            "int32", "uint32",
+            "float32", "float64",
+        ])
+        self.dtype_combo.setCurrentText("int16")
+        layout.addRow("Data Type", self.dtype_combo)
+
+        # Header offset (bytes)
+        self.offset_spin = QSpinBox()
+        self.offset_spin.setRange(0, 2_147_483_647)
+        self.offset_spin.setValue(0)
+        layout.addRow("Header Offset (bytes)", self.offset_spin)
+
+        # Data length (bytes, 0 = to end)
+        self.length_spin = QSpinBox()
+        self.length_spin.setRange(0, 2_147_483_647)
+        self.length_spin.setValue(0)
+        layout.addRow("Data Length (bytes)", self.length_spin)
+
+        # Sample rate
+        self.sr_spin = QDoubleSpinBox()
+        self.sr_spin.setRange(1e-12, 1e12)
+        self.sr_spin.setDecimals(6)
+        self.sr_spin.setValue(1_000_000.0)
+        layout.addRow("Sample Rate (Hz)", self.sr_spin)
+
+        # Scale (V per unit)
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(-1e12, 1e12)
+        self.scale_spin.setDecimals(9)
+        self.scale_spin.setValue(1.0)
+        layout.addRow("Scale (V per unit)", self.scale_spin)
+
+        # Offset (V)
+        self.voffset_spin = QDoubleSpinBox()
+        self.voffset_spin.setRange(-1e12, 1e12)
+        self.voffset_spin.setDecimals(9)
+        self.voffset_spin.setValue(0.0)
+        layout.addRow("Offset (V)", self.voffset_spin)
+
+        # Channel count (for simple interleaving support)
+        self.chan_count_spin = QSpinBox()
+        self.chan_count_spin.setRange(1, 128)
+        self.chan_count_spin.setValue(1)
+        layout.addRow("Channel Count (interleaved)", self.chan_count_spin)
+
+        # Channel index to extract (0-based)
+        self.chan_index_spin = QSpinBox()
+        self.chan_index_spin.setRange(0, 127)
+        self.chan_index_spin.setValue(0)
+        layout.addRow("Channel Index (0-based)", self.chan_index_spin)
+
+        # Keep channel index max synced with channel count
+        def _sync_channel_index_max(val):
+            self.chan_index_spin.setMaximum(max(0, val - 1))
+        self.chan_count_spin.valueChanged.connect(_sync_channel_index_max)
+        _sync_channel_index_max(self.chan_count_spin.value())
+
+        # Auto-detect on load option
+        self.auto_check = QCheckBox("Auto-detect header on load")
+        self.auto_check.setChecked(False)
+        layout.addRow(self.auto_check)
+
+        # Tools row: Preview and Auto-detect buttons
+        tools_row = QWidget()
+        tools_layout = QHBoxLayout(tools_row)
+        self.preview_btn = QPushButton("Preview")
+        self.autodetect_btn = QPushButton("Auto-detect Now")
+        tools_layout.addWidget(self.preview_btn)
+        tools_layout.addWidget(self.autodetect_btn)
+        layout.addRow("Tools", tools_row)
+
+        # Preview label
+        self.preview_label = QLabel("No preview yet")
+        self.preview_label.setWordWrap(True)
+        layout.addRow("Preview", self.preview_label)
+
+        # Preview thumbnail plot
+        self.preview_plot = pg.PlotWidget()
+        self.preview_plot.setMinimumHeight(120)
+        self.preview_plot.setBackground('w')
+        self.preview_plot.showGrid(x=True, y=True)
+        layout.addRow("Thumbnail", self.preview_plot)
+
+        # Dialog buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Connect tool actions
+        self.preview_btn.clicked.connect(self.preview_data)
+        self.autodetect_btn.clicked.connect(self.auto_detect_offset)
+
+        # Live update preview when key settings change
+        self.endian_combo.currentTextChanged.connect(self.preview_data)
+        self.dtype_combo.currentTextChanged.connect(self.preview_data)
+        self.offset_spin.valueChanged.connect(self.preview_data)
+        self.chan_count_spin.valueChanged.connect(self.preview_data)
+        self.chan_index_spin.valueChanged.connect(self.preview_data)
+        self.sr_spin.valueChanged.connect(self.preview_data)
+        self.scale_spin.valueChanged.connect(self.preview_data)
+        self.voffset_spin.valueChanged.connect(self.preview_data)
+
+        # Initial preview
+        try:
+            self.preview_data()
+        except Exception:
+            pass
+
+    def get_params(self):
+        return {
+            "endian": self.endian_combo.currentText(),
+            "dtype": self.dtype_combo.currentText(),
+            "offset_bytes": int(self.offset_spin.value()),
+            "length_bytes": int(self.length_spin.value()),
+            "sample_rate_hz": float(self.sr_spin.value()),
+            "scale_v_per_unit": float(self.scale_spin.value()),
+            "v_offset": float(self.voffset_spin.value()),
+            "channel_count": int(self.chan_count_spin.value()),
+            "channel_index": int(self.chan_index_spin.value()),
+            "auto_detect": bool(self.auto_check.isChecked()),
+        }
+
+    # --- Helper methods for preview and auto-detect ---
+    def _np_dtype(self):
+        endian_char = '<' if self.endian_combo.currentText().lower().startswith('l') else '>'
+        dtype_map = {
+            'int8': 'i1', 'uint8': 'u1',
+            'int16': 'i2', 'uint16': 'u2',
+            'int32': 'i4', 'uint32': 'u4',
+            'float32': 'f4', 'float64': 'f8',
+        }
+        base = dtype_map.get(self.dtype_combo.currentText())
+        if base is None:
+            raise ValueError(f"Unsupported data type: {self.dtype_combo.currentText()}")
+        return np.dtype(endian_char + base)
+
+    def _read_channel_samples(self, start_offset: int, items_wanted: int) -> np.ndarray:
+        if not self.file_path:
+            return np.array([], dtype=np.float64)
+        np_dtype = self._np_dtype()
+        ch_count = max(1, int(self.chan_count_spin.value()))
+        ch_index = min(max(0, int(self.chan_index_spin.value())), ch_count - 1)
+        sample_bytes = np_dtype.itemsize * ch_count
+        eff_offset = ((int(start_offset) + sample_bytes - 1) // sample_bytes) * sample_bytes
+        # For interleaved, read enough items to extract desired channel samples
+        total_items = items_wanted * ch_count
+        with open(self.file_path, 'rb') as f:
+            if eff_offset:
+                f.seek(eff_offset, 0)
+            raw = np.fromfile(f, dtype=np_dtype, count=total_items)
+        if raw.size == 0:
+            return np.array([], dtype=np.float64)
+        if ch_count > 1:
+            usable = (raw.size // ch_count) * ch_count
+            raw = raw[:usable].reshape(-1, ch_count)[:, ch_index]
+        return raw.astype(np.float64)
+
+    def preview_data(self):
+        try:
+            if not self.file_path:
+                self.preview_label.setText("No file selected for preview")
+                self.preview_plot.clear()
+                return
+            offset = int(self.offset_spin.value())
+            # Compute effective aligned offset for display
+            np_dtype = self._np_dtype()
+            ch_count = max(1, int(self.chan_count_spin.value()))
+            sample_bytes = np_dtype.itemsize * ch_count
+            eff_offset = ((int(offset) + sample_bytes - 1) // sample_bytes) * sample_bytes
+            window = self._read_channel_samples(offset, 4096)
+            if window.size == 0:
+                self.preview_label.setText("Preview: no data at current offset")
+                self.preview_plot.clear()
+                return
+            diffs = np.diff(window)
+            transitions = int(np.count_nonzero(diffs != 0))
+            unique_vals = int(len(np.unique(window)))
+            unique_frac = unique_vals / max(1, window.size)
+            # Apply scale/offset for display
+            scale = float(self.scale_spin.value())
+            voffset = float(self.voffset_spin.value())
+            y = window * scale + voffset
+            sr = float(self.sr_spin.value())
+            x = np.arange(y.size) / max(sr, 1e-12)
+            # Update plot
+            self.preview_plot.clear()
+            self.preview_plot.plot(x, y, pen=pg.mkPen('#0077cc', width=1))
+
+            msg = (
+                f"Samples: {window.size}\n"
+                f"Effective offset: {eff_offset} bytes\n"
+                f"Min/Max (scaled): {np.nanmin(y):.3g} / {np.nanmax(y):.3g}\n"
+                f"Mean/Std (scaled): {np.nanmean(y):.3g} / {np.nanstd(y):.3g}\n"
+                f"Transitions: {transitions} ({transitions/window.size:.3%})\n"
+                f"Unique values: {unique_vals} ({unique_frac:.1%})"
+            )
+            self.preview_label.setText(msg)
+        except Exception as e:
+            self.preview_label.setText(f"Preview error: {e}")
+            self.preview_plot.clear()
+
+    def auto_detect_offset(self):
+        try:
+            if not self.file_path:
+                self.preview_label.setText("No file selected for detection")
+                return
+            np_dtype = self._np_dtype()
+            ch_count = max(1, int(self.chan_count_spin.value()))
+            ch_index = min(max(0, int(self.chan_index_spin.value())), ch_count - 1)
+            best = detect_header_offset(self.file_path, np_dtype, ch_count, ch_index)
+            self.offset_spin.setValue(int(best))
+            self.preview_data()
+        except Exception as e:
+            self.preview_label.setText(f"Auto-detect error: {e}")
+
+    def auto_detect_on_load(self) -> bool:
+        return bool(self.auto_check.isChecked())
+
+def detect_header_offset(file_path: str, np_dtype: np.dtype, channel_count: int, channel_index: int, max_scan_bytes: int = 1 << 20) -> int:
+    """
+    Heuristic header detector: scans the first portion of the file in aligned steps
+    and returns the offset where the data appears least "random" based on low
+    transition density and low unique value fraction in a window.
+
+    Returns byte offset.
+    """
+    step = max(1, int(np_dtype.itemsize) * max(1, channel_count))
+    file_size = Path(file_path).stat().st_size
+    limit = min(max_scan_bytes, file_size)
+
+    def window_score(arr: np.ndarray) -> float:
+        if arr.size < 64:
+            return float('inf')
+        diffs = np.diff(arr)
+        trans = np.count_nonzero(diffs != 0) / arr.size
+        uniq = len(np.unique(arr)) / arr.size
+        # Favor fewer transitions and fewer unique values (plateaus)
+        return trans + 0.75 * uniq
+
+    best_offset = 0
+    best_score = float('inf')
+    # Scan in steps; ensure we don't read too much each time
+    items_per_window = 4096
+    for off in range(0, int(limit), step * 8):  # hop by 8 samples worth to speed up
+        # Read enough raw items to get items_per_window for the selected channel
+        total_needed = items_per_window * channel_count
+        with open(file_path, 'rb') as f:
+            f.seek(off, 0)
+            raw = np.fromfile(f, dtype=np_dtype, count=total_needed)
+        if raw.size < items_per_window:
+            continue
+        if channel_count > 1:
+            usable = (raw.size // channel_count) * channel_count
+            raw = raw[:usable].reshape(-1, channel_count)[:, channel_index]
+        arr = raw.astype(np.float64)
+        s = window_score(arr)
+        if s < best_score:
+            best_score = s
+            best_offset = off
+    return best_offset
 
 def decimate_data(x, y, max_points=10000):
     """Reduce number of points using min-max decimation to preserve signal features"""
@@ -119,6 +402,10 @@ class OscilloscopeViewer(QMainWindow):
         load_button = QPushButton("Load CSV")
         load_button.clicked.connect(self.load_csv)
         button_layout.addWidget(load_button)
+
+        load_bin_button = QPushButton("Load Binary")
+        load_bin_button.clicked.connect(self.load_binary)
+        button_layout.addWidget(load_bin_button)
         
         add_vcursor_button = QPushButton("Add Vertical Cursor")
         add_vcursor_button.clicked.connect(self.add_vertical_cursor)
@@ -275,6 +562,187 @@ class OscilloscopeViewer(QMainWindow):
                 return
             finally:
                 progress.close()
+
+    def load_binary(self):
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Open Binary File", "", "All Files (*)"
+        )
+
+        if not file_name:
+            return
+
+        # Ask user for binary import settings
+        dlg = BinaryImportDialog(self, file_path=file_name)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        params = dlg.get_params()
+
+        # Optionally auto-detect header on load
+        if params.get("auto_detect"):
+            try:
+                endian_char = '<' if params['endian'].lower().startswith('l') else '>'
+                dtype_map = {
+                    'int8': 'i1', 'uint8': 'u1',
+                    'int16': 'i2', 'uint16': 'u2',
+                    'int32': 'i4', 'uint32': 'u4',
+                    'float32': 'f4', 'float64': 'f8',
+                }
+                base = dtype_map.get(params['dtype'])
+                if base is None:
+                    raise ValueError(f"Unsupported data type: {params['dtype']}")
+                np_dtype = np.dtype(endian_char + base)
+                ch_count = max(1, int(params['channel_count']))
+                ch_index = int(params['channel_index'])
+                auto_offset = detect_header_offset(file_name, np_dtype, ch_count, ch_index)
+                params['offset_bytes'] = int(auto_offset)
+            except Exception as _e:
+                # Fall back to user-provided offset if detection fails
+                pass
+
+        # Create progress dialog
+        progress = QProgressDialog("Loading binary file...", "Cancel", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setAutoClose(True)
+        progress.setMinimumDuration(0)
+
+        try:
+            # Validate params
+            if params["sample_rate_hz"] <= 0:
+                raise ValueError("Sample rate must be > 0")
+
+            endian_char = '<' if params['endian'].lower().startswith('l') else '>'
+            dtype_map = {
+                'int8': 'i1', 'uint8': 'u1',
+                'int16': 'i2', 'uint16': 'u2',
+                'int32': 'i4', 'uint32': 'u4',
+                'float32': 'f4', 'float64': 'f8',
+            }
+            base = dtype_map.get(params['dtype'])
+            if base is None:
+                raise ValueError(f"Unsupported data type: {params['dtype']}")
+            np_dtype = np.dtype(endian_char + base)
+
+            offset = int(params['offset_bytes'])
+            length_bytes = int(params['length_bytes'])
+
+            # Align offset to sample boundary (dtype size * channel_count)
+            ch_count = max(1, int(params['channel_count']))
+            sample_bytes = np_dtype.itemsize * ch_count
+            eff_offset = ((int(offset) + sample_bytes - 1) // sample_bytes) * sample_bytes
+
+            # Adjust length if provided to account for alignment shift
+            if length_bytes > 0:
+                align_delta = max(0, eff_offset - offset)
+                eff_length_bytes = max(0, length_bytes - align_delta)
+            else:
+                eff_length_bytes = 0
+
+            progress.setValue(5)
+            progress.setLabelText("Reading file...")
+            if progress.wasCanceled():
+                raise InterruptedError("File loading cancelled by user")
+
+            # Determine number of items to read
+            if eff_length_bytes > 0:
+                count = eff_length_bytes // np_dtype.itemsize
+            else:
+                # Compute remaining bytes to end of file
+                file_size = Path(file_name).stat().st_size
+                remaining_bytes = max(0, file_size - eff_offset)
+                count = remaining_bytes // np_dtype.itemsize
+
+            # Read using a file handle: seek to offset then fromfile
+            with open(file_name, 'rb') as f:
+                if eff_offset:
+                    f.seek(eff_offset, 0)
+                data = np.fromfile(f, dtype=np_dtype, count=count)
+
+            if data.size == 0:
+                raise ValueError("No data samples found with the given settings")
+
+            progress.setValue(30)
+            progress.setLabelText("Processing channels...")
+            if progress.wasCanceled():
+                raise InterruptedError("File loading cancelled by user")
+
+            ch_index = int(params['channel_index'])
+            if ch_index < 0 or ch_index >= ch_count:
+                raise ValueError("Channel index out of range")
+
+            if ch_count > 1:
+                # Assume simple interleaving by sample
+                total_samples = data.size // ch_count
+                if total_samples == 0:
+                    raise ValueError("Not enough data for the specified channel count")
+                data = data[: total_samples * ch_count]
+                data = data.reshape(total_samples, ch_count)
+                data = data[:, ch_index]
+
+            progress.setValue(60)
+            progress.setLabelText("Building time axis...")
+            if progress.wasCanceled():
+                raise InterruptedError("File loading cancelled by user")
+
+            sr = float(params['sample_rate_hz'])
+            t = np.arange(data.size, dtype=np.float64) / sr
+
+            # Apply scaling
+            scale = float(params['scale_v_per_unit'])
+            voffset = float(params['v_offset'])
+            y = data.astype(np.float64) * scale + voffset
+
+            progress.setValue(80)
+            progress.setLabelText("Creating DataFrame...")
+            if progress.wasCanceled():
+                raise InterruptedError("File loading cancelled by user")
+
+            df = pd.DataFrame({'Second': t, 'Value': y})
+
+            # Metadata
+            metadata = {
+                'format': 'Binary',
+                'Horizontal Units': ['s'],
+                'Vertical Units': ['V'],
+                'Sample Rate (Hz)': [sr],
+                'Endian': [params['endian']],
+                'Data Type': [params['dtype']],
+                'Requested Header Offset (bytes)': [offset],
+                'Effective Header Offset (bytes)': [eff_offset],
+                'Header Alignment (bytes)': [sample_bytes],
+                'Data Length (bytes)': [
+                    eff_length_bytes if eff_length_bytes > 0 else (Path(file_name).stat().st_size - eff_offset)
+                ],
+            }
+
+            self.metadata, self.raw_data = metadata, df
+
+            # Update UI similarly to CSV load
+            self.data_info_label.setText(
+                f"Total points: {len(self.raw_data):,}\n"
+                f"Displayed points: {self.decimation_factor:,}"
+            )
+
+            # No multi-channel metadata for now
+            self.channel_combo.blockSignals(True)
+            self.channel_combo.clear()
+            self.channel_combo.setEnabled(False)
+            self.selected_channel = None
+            self.channel_combo.blockSignals(False)
+
+            self.update_plot()
+
+            progress.setValue(100)
+            progress.setLabelText("Done!")
+
+        except InterruptedError:
+            self.data_info_label.setText("Loading cancelled")
+            return
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "Error", f"Failed to parse binary file: {str(e)}")
+            return
+        finally:
+            progress.close()
 
     def update_decimation(self, value):
         self.decimation_factor = value
