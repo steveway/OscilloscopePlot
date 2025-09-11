@@ -2,6 +2,7 @@ import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import warnings
 from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                               QPushButton, QWidget, QFileDialog, QLabel, QSpinBox,
                               QMessageBox, QProgressDialog, QComboBox, QDialog,
@@ -203,7 +204,11 @@ class BinaryImportDialog(QDialog):
         if ch_count > 1:
             usable = (raw.size // ch_count) * ch_count
             raw = raw[:usable].reshape(-1, ch_count)[:, ch_index]
-        return raw.astype(np.float64)
+        # Casting arbitrary binary to float can raise runtime warnings for certain bit patterns.
+        # Suppress these in preview reads; downstream code handles non-finite values robustly.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            return raw.astype(np.float64, copy=False)
 
     def preview_data(self):
         try:
@@ -236,11 +241,36 @@ class BinaryImportDialog(QDialog):
             self.preview_plot.clear()
             self.preview_plot.plot(x, y, pen=pg.mkPen('#0077cc', width=1))
 
+            # Compute robust stats to avoid warnings on all-NaN windows
+            # When interpreting arbitrary binary data as float32/float64, the preview window
+            # may contain only NaN/Inf values. We compute statistics on finite values only,
+            # and fall back to NaN if none are finite.
             msg = (
                 f"Samples: {window.size}\n"
                 f"Effective offset: {eff_offset} bytes\n"
-                f"Min/Max (scaled): {np.nanmin(y):.3g} / {np.nanmax(y):.3g}\n"
-                f"Mean/Std (scaled): {np.nanmean(y):.3g} / {np.nanstd(y):.3g}\n"
+            )
+            valid = np.isfinite(y)
+            if np.any(valid):
+                y_valid = y[valid]
+                min_val = float(np.min(y_valid))
+                max_val = float(np.max(y_valid))
+                mean_val = float(np.mean(y_valid))
+                # Stable std: scale before squaring to avoid overflow
+                s = float(np.max(np.abs(y_valid)))
+                if s > 0 and np.isfinite(s):
+                    z = (y_valid - mean_val) / s
+                    std_val = float(s * np.sqrt(np.mean(z * z)))
+                else:
+                    std_val = 0.0
+            else:
+                min_val = float('nan')
+                max_val = float('nan')
+                mean_val = float('nan')
+                std_val = float('nan')
+
+            msg += (
+                f"Min/Max (scaled): {min_val:.3g} / {max_val:.3g}\n"
+                f"Mean/Std (scaled): {mean_val:.3g} / {std_val:.3g}\n"
                 f"Transitions: {transitions} ({transitions/window.size:.3%})\n"
                 f"Unique values: {unique_vals} ({unique_frac:.1%})"
             )
@@ -302,7 +332,9 @@ def detect_header_offset(file_path: str, np_dtype: np.dtype, channel_count: int,
         if channel_count > 1:
             usable = (raw.size // channel_count) * channel_count
             raw = raw[:usable].reshape(-1, channel_count)[:, channel_index]
-        arr = raw.astype(np.float64)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            arr = raw.astype(np.float64, copy=False)
         s = window_score(arr)
         if s < best_score:
             best_score = s
