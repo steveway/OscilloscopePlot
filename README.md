@@ -46,17 +46,40 @@ python oscilloscope_viewer.py
    - Adjust the "Max Points" value to balance between performance and detail
    - Use mouse wheel to zoom and right-click drag to pan
 
-## Supported File Format
+## Supported File Formats
 
-The application expects CSV files in the Siglent oscilloscope format with metadata headers followed by time-voltage data pairs. Example format:
+The application supports the following file formats:
 
-```csv
-Record Length,Analog:450584,
-Sample Interval,Analog:5.000000E-05,
-Vertical Units,CH3:V,,
-...
-Second,Value
-+1.240000E+01,+4.000008E-02
-+1.240005E+01,+4.000008E-02
-...
-```
+### Oscilloscope Formats
+- **Batronix CSV**
+  - Standard format with time and voltage data
+  - Identified by header containing 'time difference to trigger in s'
+
+- **Batronix Display Data CSV**
+  - Contains min/max envelopes
+  - Identified by headers containing 'time in s' with 'minimum' and 'maximum' columns
+
+- **Rigol Standard CSV**
+  - Basic CSV format with Time(s) and channel data
+  - Identified by header starting with 'Time(s),CH1V'
+
+- **Rigol Arb CSV**
+  - Advanced format with metadata
+  - Identified by header containing 'RIGOL:CSV DATA FILE'
+
+- **Siglent CSV**
+  - Includes detailed metadata
+  - Identified by headers containing 'Record Length' and 'Model Number'
+
+### General Purpose Formats
+- **PyQtGraph CSV**
+  - Simple two-column format (time, value)
+  - Compatible with PyQtGraph's CSV export
+  - Automatically detected by header format (x0000,y0000)
+
+- **Binary Files**
+  - Raw binary data import with configurable settings
+  - Supports various data types and endianness
+  - Accessible through the "Import Binary..." option
+
+The application will automatically detect the file format and parse it accordingly. For binary files, you'll be prompted to specify the data format.
