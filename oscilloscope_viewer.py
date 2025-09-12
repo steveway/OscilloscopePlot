@@ -60,6 +60,17 @@ class BinaryImportDialog(QDialog):
         self.offset_spin.setValue(0)
         layout.addRow("Header Offset (bytes)", self.offset_spin)
 
+        # Optional: specify total points per channel instead of header size
+        self.use_points_check = QCheckBox("Specify points per channel (derive header automatically)")
+        self.use_points_check.setChecked(False)
+        layout.addRow(self.use_points_check)
+
+        self.points_spin = QSpinBox()
+        self.points_spin.setRange(0, 2_147_483_647)
+        self.points_spin.setValue(0)
+        self.points_spin.setEnabled(False)
+        layout.addRow("Points per channel", self.points_spin)
+
         # Data length (bytes, 0 = to end)
         self.length_spin = QSpinBox()
         self.length_spin.setRange(0, 2_147_483_647)
@@ -150,8 +161,20 @@ class BinaryImportDialog(QDialog):
         self.sr_spin.valueChanged.connect(self.preview_data)
         self.scale_spin.valueChanged.connect(self.preview_data)
         self.voffset_spin.valueChanged.connect(self.preview_data)
+        self.use_points_check.toggled.connect(self._on_use_points_toggled)
+        self.points_spin.valueChanged.connect(self.preview_data)
 
         # Initial preview
+        try:
+            self.preview_data()
+        except Exception:
+            pass
+
+    def _on_use_points_toggled(self, checked: bool):
+        # Enable/disable fields depending on mode
+        self.points_spin.setEnabled(checked)
+        # In points mode, offset can be left as-is but is derived; keep it editable for flexibility
+        # Trigger preview update
         try:
             self.preview_data()
         except Exception:
@@ -169,6 +192,8 @@ class BinaryImportDialog(QDialog):
             "channel_count": int(self.chan_count_spin.value()),
             "channel_index": int(self.chan_index_spin.value()),
             "auto_detect": bool(self.auto_check.isChecked()),
+            "use_points": bool(self.use_points_check.isChecked()),
+            "points_per_channel": int(self.points_spin.value()),
         }
 
     # --- Helper methods for preview and auto-detect ---
@@ -221,8 +246,35 @@ class BinaryImportDialog(QDialog):
             np_dtype = self._np_dtype()
             ch_count = max(1, int(self.chan_count_spin.value()))
             sample_bytes = np_dtype.itemsize * ch_count
-            eff_offset = ((int(offset) + sample_bytes - 1) // sample_bytes) * sample_bytes
-            window = self._read_channel_samples(offset, 4096)
+            file_size = Path(self.file_path).stat().st_size
+            # If using points mode, derive header automatically from points
+            if self.use_points_check.isChecked():
+                points = max(0, int(self.points_spin.value()))
+                desired_bytes = points * sample_bytes
+                # Compute header offset as the remaining bytes at the front
+                eff_offset = max(0, file_size - desired_bytes)
+                # Align down to sample boundary
+                eff_offset = (eff_offset // sample_bytes) * sample_bytes
+            else:
+                eff_offset = ((int(offset) + sample_bytes - 1) // sample_bytes) * sample_bytes
+            # Compute total points per channel based on current settings
+            length_bytes = int(self.length_spin.value())
+            if self.use_points_check.isChecked():
+                # Limit to requested points if set, or file remainder otherwise
+                points = max(0, int(self.points_spin.value()))
+                desired_bytes = points * sample_bytes
+                eff_length_bytes = min(desired_bytes, max(0, file_size - eff_offset))
+            else:
+                if length_bytes > 0:
+                    align_delta = max(0, eff_offset - offset)
+                    eff_length_bytes = max(0, length_bytes - align_delta)
+                else:
+                    eff_length_bytes = max(0, file_size - eff_offset)
+            total_items = eff_length_bytes // max(1, np_dtype.itemsize)
+            total_points = total_items // max(1, ch_count)
+            # For preview, read from effective offset when using points mode
+            start_for_preview = eff_offset if self.use_points_check.isChecked() else offset
+            window = self._read_channel_samples(start_for_preview, 4096)
             if window.size == 0:
                 self.preview_label.setText("Preview: no data at current offset")
                 self.preview_plot.clear()
@@ -271,6 +323,7 @@ class BinaryImportDialog(QDialog):
             msg += (
                 f"Min/Max (scaled): {min_val:.3g} / {max_val:.3g}\n"
                 f"Mean/Std (scaled): {mean_val:.3g} / {std_val:.3g}\n"
+                f"Total points (per channel): {total_points:,}\n"
                 f"Transitions: {transitions} ({transitions/window.size:.3%})\n"
                 f"Unique values: {unique_vals} ({unique_frac:.1%})"
             )
@@ -289,6 +342,13 @@ class BinaryImportDialog(QDialog):
             ch_index = min(max(0, int(self.chan_index_spin.value())), ch_count - 1)
             best = detect_header_offset(self.file_path, np_dtype, ch_count, ch_index)
             self.offset_spin.setValue(int(best))
+            # If using points mode, derive points from detected offset
+            if self.use_points_check.isChecked():
+                sample_bytes = np_dtype.itemsize * ch_count
+                file_size = Path(self.file_path).stat().st_size
+                remaining = max(0, file_size - int(best))
+                pts = (remaining // sample_bytes)
+                self.points_spin.setValue(int(pts))
             self.preview_data()
         except Exception as e:
             self.preview_label.setText(f"Auto-detect error: {e}")
@@ -660,14 +720,25 @@ class OscilloscopeViewer(QMainWindow):
             # Align offset to sample boundary (dtype size * channel_count)
             ch_count = max(1, int(params['channel_count']))
             sample_bytes = np_dtype.itemsize * ch_count
-            eff_offset = ((int(offset) + sample_bytes - 1) // sample_bytes) * sample_bytes
 
-            # Adjust length if provided to account for alignment shift
-            if length_bytes > 0:
-                align_delta = max(0, eff_offset - offset)
-                eff_length_bytes = max(0, length_bytes - align_delta)
+            # Determine effective offset/length with optional points-per-channel mode
+            file_size = Path(file_name).stat().st_size
+            use_points = bool(params.get('use_points'))
+            points_per_channel = int(params.get('points_per_channel', 0))
+            if use_points and points_per_channel > 0:
+                desired_bytes = points_per_channel * sample_bytes
+                eff_offset = max(0, file_size - desired_bytes)
+                eff_offset = (eff_offset // sample_bytes) * sample_bytes  # align down
+                # Limit length to desired bytes but not beyond file end
+                eff_length_bytes = min(desired_bytes, max(0, file_size - eff_offset))
             else:
-                eff_length_bytes = 0
+                eff_offset = ((int(offset) + sample_bytes - 1) // sample_bytes) * sample_bytes
+                # Adjust length if provided to account for alignment shift
+                if length_bytes > 0:
+                    align_delta = max(0, eff_offset - offset)
+                    eff_length_bytes = max(0, length_bytes - align_delta)
+                else:
+                    eff_length_bytes = 0
 
             progress.setValue(5)
             progress.setLabelText("Reading file...")
@@ -679,7 +750,6 @@ class OscilloscopeViewer(QMainWindow):
                 count = eff_length_bytes // np_dtype.itemsize
             else:
                 # Compute remaining bytes to end of file
-                file_size = Path(file_name).stat().st_size
                 remaining_bytes = max(0, file_size - eff_offset)
                 count = remaining_bytes // np_dtype.itemsize
 
@@ -754,6 +824,11 @@ class OscilloscopeViewer(QMainWindow):
                     eff_length_bytes if eff_length_bytes > 0 else (Path(file_name).stat().st_size - eff_offset)
                 ],
             }
+
+            # Record points-per-channel mode
+            metadata['Using Points Mode'] = [str(use_points)]
+            if use_points:
+                metadata['Points per Channel (requested)'] = [points_per_channel]
 
             # Save channels metadata for UI selection
             if ch_count >= 1:
