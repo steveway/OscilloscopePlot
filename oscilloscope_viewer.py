@@ -698,8 +698,7 @@ class OscilloscopeViewer(QMainWindow):
                 raise InterruptedError("File loading cancelled by user")
 
             ch_index = int(params['channel_index'])
-            if ch_index < 0 or ch_index >= ch_count:
-                raise ValueError("Channel index out of range")
+            # Note: we load all channels for plotting; channel_index is used for preview/detection only
 
             if ch_count > 1:
                 # Assume simple interleaving by sample
@@ -708,7 +707,9 @@ class OscilloscopeViewer(QMainWindow):
                     raise ValueError("Not enough data for the specified channel count")
                 data = data[: total_samples * ch_count]
                 data = data.reshape(total_samples, ch_count)
-                data = data[:, ch_index]
+            else:
+                # Single-channel data as 2D for consistent handling downstream
+                data = data.reshape(-1, 1)
 
             progress.setValue(60)
             progress.setLabelText("Building time axis...")
@@ -716,19 +717,27 @@ class OscilloscopeViewer(QMainWindow):
                 raise InterruptedError("File loading cancelled by user")
 
             sr = float(params['sample_rate_hz'])
-            t = np.arange(data.size, dtype=np.float64) / sr
+            t = np.arange(data.shape[0], dtype=np.float64) / sr
 
-            # Apply scaling
+            # Apply scaling (same scale/offset for all channels)
             scale = float(params['scale_v_per_unit'])
             voffset = float(params['v_offset'])
-            y = data.astype(np.float64) * scale + voffset
+            y2d = data.astype(np.float64) * scale + voffset
 
             progress.setValue(80)
             progress.setLabelText("Creating DataFrame...")
             if progress.wasCanceled():
                 raise InterruptedError("File loading cancelled by user")
 
-            df = pd.DataFrame({'Second': t, 'Value': y})
+            # Build DataFrame with one column per channel and a primary 'Value' column
+            df_dict = {'Second': t}
+            for ch in range(ch_count):
+                df_dict[f'Value_CH{ch + 1}'] = y2d[:, ch]
+            # Prefer CH1 as primary Value if available
+            primary_ch = 1 if ch_count >= 1 else None
+            if primary_ch is not None:
+                df_dict['Value'] = df_dict[f'Value_CH{primary_ch}']
+            df = pd.DataFrame(df_dict)
 
             # Metadata
             metadata = {
@@ -746,6 +755,10 @@ class OscilloscopeViewer(QMainWindow):
                 ],
             }
 
+            # Save channels metadata for UI selection
+            if ch_count >= 1:
+                metadata['Channels'] = list(range(1, ch_count + 1))
+
             self.metadata, self.raw_data = metadata, df
 
             # Update UI similarly to CSV load
@@ -754,11 +767,28 @@ class OscilloscopeViewer(QMainWindow):
                 f"Displayed points: {self.decimation_factor:,}"
             )
 
-            # No multi-channel metadata for now
+            # Populate channel selector if available
+            channels = self.metadata.get('Channels')
             self.channel_combo.blockSignals(True)
             self.channel_combo.clear()
-            self.channel_combo.setEnabled(False)
-            self.selected_channel = None
+            if channels:
+                for ch in channels:
+                    self.channel_combo.addItem(f"CH{ch}")
+                # Prefer CH1 if present, else first
+                if 1 in channels:
+                    self.channel_combo.setCurrentText("CH1")
+                    self.selected_channel = 1
+                else:
+                    self.channel_combo.setCurrentIndex(0)
+                    # Extract number from text
+                    try:
+                        self.selected_channel = int(self.channel_combo.currentText().replace('CH',''))
+                    except Exception:
+                        self.selected_channel = None
+                self.channel_combo.setEnabled(True)
+            else:
+                self.channel_combo.setEnabled(False)
+                self.selected_channel = None
             self.channel_combo.blockSignals(False)
 
             self.update_plot()
