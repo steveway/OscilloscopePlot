@@ -5,8 +5,11 @@ from .base_parser import OscilloscopeCSVParser
 class SiglentCSVParser(OscilloscopeCSVParser):
     def can_parse(self, first_lines):
         # Siglent files start with "Record Length" and contain model info
-        return (any('Record Length' in line for line in first_lines) and
-                any('Model Number' in line for line in first_lines))
+        has_old_metadata = (any('Record Length' in line for line in first_lines) and
+                            any('Model Number' in line for line in first_lines))
+        has_simple_header = (any('Source,CH' in line for line in first_lines) and
+                             any('Second,Value' in line for line in first_lines))
+        return has_old_metadata or has_simple_header
         
     def parse(self, file_path, progress_callback=None):
         metadata = {}
